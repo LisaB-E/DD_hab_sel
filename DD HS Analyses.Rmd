@@ -1,0 +1,395 @@
+---
+title: "DD HS"
+author: "LBE"
+date: "23/05/2022"
+output: github_document
+---
+
+
+#workspace setup
+
+```{r, echo=FALSE, message=FALSE}
+library(tidyverse)
+library(lubridate)
+library(ggpubr)
+library(aod)
+
+```
+#THEMES
+```{r}
+# paper theme
+theme_DDHS <- theme_classic()+
+    theme(panel.border = element_rect(size=1, fill=NA),
+          axis.text = element_text(family="Arial", size = 12),
+          axis.title = element_text(family="Arial", size = 12),
+          title = element_text(family = "Arial",  size = 12),
+          plot.title = element_text(hjust = 0.5, vjust = 1))
+
+ cols_= c("#F7444E", "#78BCC4")
+```
+
+
+#SURVEYS
+
+##data
+```{r}
+
+crest_surveys <- read_csv("./data/surveys_RAW.csv") %>% 
+  dplyr::select(2:ncol(.))
+
+#density data
+
+crest_density <- crest_surveys %>% 
+  mutate(prop_DC = (DC/(DC+LC)),
+         prop_LC = (LC/(DC+LC)),
+         dens_PM = (as.numeric(adult)+juv)/col_m2,
+         dens_adult = as.numeric(adult)/col_m2)
+  
+  crest_summary <- crest_density %>% 
+    group_by(type) %>% 
+    summarise(n=length(dens_PM),
+              n_transect = length(unique(Code)),
+              mean_25 = mean(dens_PM[prop_DC<=0.25]),
+              mean_75 = mean(dens_PM[prop_DC>=0.75]),
+              SEM_25 = sd(dens_PM[prop_DC<=0.25])/sqrt(length(dens_PM[prop_DC<=0.25])),
+              SEM_75 = sd(dens_PM[prop_DC>=0.75])/sqrt(length(dens_PM[prop_DC>=0.75])))
+
+  #summary coral data
+crest_transects <- crest_density %>% 
+  dplyr::select(2, 8:18) %>% 
+  distinct() %>% 
+  mutate(LCC = LC/100,
+         DCC = DC/100,
+         prop_o_LC = replace_na(o_LC/(LC+DC),0),
+         prop_o_DC = replace_na(o_DC/(DC+LC),0)) %>% 
+  dplyr::select(9:10,12,15:16) %>% 
+  pivot_longer(names_to = "type",values_to = "prop.occ", cols = 4:5 ) %>% 
+  mutate(type = recode(type, "prop_o_DC" = "Dead",
+                "prop_o_LC" = "Live")) 
+
+#only occupied corals
+
+occ_transects <- crest_density %>% 
+  filter(adult>0) %>% 
+  dplyr::group_by(Code, prop_DC) %>% 
+  dplyr::mutate(ttl_occ = length(Code)) %>% 
+  ungroup() %>% 
+  dplyr::group_by(Code, type, prop_DC) %>% 
+ dplyr::summarise(occ_freq = length(Code),
+                  oc_prop = occ_freq/ttl_occ) %>% 
+  distinct()
+
+occ_summary <- occ_transects %>% 
+    group_by(type) %>% 
+    summarise(n=length(oc_prop))
+  
+```
+
+#analysis
+```{r}
+dens.lm <- lm(log(dens_PM)~prop_DC*type, data = crest_density)
+
+summary(dens.lm)
+
+plot(dens.lm)
+
+library(broom)
+model.diag.metrics <- augment(dens.lm)
+model.diag.metrics %>%
+  top_n(3, wt = .cooksd)
+
+```
+#Q1 - DD HS?
+**Is there evidence for DD habitat selection on natural reefs, and is this influenced by the health of the colony you're on?**  
+ *YES* There is a significant relationship between the density of moluccensis on coral colonies and the proportion dead coral on a transect, and the slope of this relationship differs depending on whether the coral colony is live or dead (two-way anova, interaction term t=2.5, df(3,375), p=0.01). Adjusted R-squared:  0.1697
+ 
+
+##figure
+```{r}
+
+#density @ colony level
+(dens_adult <- ggplot(data =  crest_density, aes(x=prop_DC, y = dens_adult, fill = type,  group = type))+
+  geom_point(size = 3, alpha = 0.5, shape = 21, aes(fill = type))+
+   stat_smooth(method = "lm", colour="black", size = 0.5, alpha =0.3, show.legend = F)+ #linear
+    # stat_smooth(method = "lm", formula = y ~ x + I(x^2), size = 1)+ #quadratic
+    # stat_smooth(method = "loess")+ #even loess is straight, ha!
+  scale_fill_manual(values = cols_)+
+  scale_colour_manual(values = cols_)+
+  labs(y = expression(Adult~density~m^-2), x = "")+
+  scale_y_continuous(limits = c(0,450),  expand = c(0,20))+
+  # facet_wrap(~period)+
+  theme_DDHS+
+  theme(legend.position = c(0.15,0.85),
+        legend.title = element_blank()))
+
+#prop occupied @ transect level - by all colonies
+(prop_occupied <- ggplot(data = crest_transects, aes(x=prop_DC, y=prop.occ, fill= type,  group=type) )+
+  geom_point(size = 3, alpha = 0.5, shape = 21, aes(fill = type))+
+  stat_smooth(method = "lm",  size = 0.5, colour = "black", alpha = 0.3, show.legend = F)+
+  scale_fill_manual(values = cols_)+
+  scale_colour_manual(values = cols_)+
+  labs(y = "Proportion occupied overall", x = "")+
+   scale_y_continuous(expand = c(0,0.01))+
+  theme_DDHS+
+  theme(legend.position = "none"))
+
+# fig_2 <- ggarrange(dens_adult, prop_occupied, nrow=1, align = "v", labels = c("a", "b"))
+  # annotate_figure(fig_2, bottom = "Proportion dead coral (transect)")
+
+# ggsave("./figures/Figure.2.jpg", height = 10, width = 20, units = "cm")
+```
+##change point analysis
+
+```{r}
+library(mcp)
+
+#define a priori model
+model = list(
+  dens_adult ~ 1 + prop_DC,  #intercept & slope
+   ~ 0 + prop_DC + I(prop_DC^2) #quadratic
+)
+
+model = list(
+  dens_adult ~ 1 + prop_DC,  #intercept & slope
+   ~ 0 + prop_DC  #different slope?
+)
+
+model = list(
+  dens_adult ~ 1 + prop_DC,  #intercept & slope
+   ~ sigma(0 + prop_DC)  #different variance?
+)
+
+fit = mcp::mcp(model, subset(crest_density, type=="Live"))
+
+plot(fit, q_predict = T)+
+  theme_classic()+
+  labs(y = "density m2", x = "proportion dead coral (transect)")
+
+# ggsave("./figures/S1.png", width = 15, height = 10, units = "cm" )
+
+print(fit$prior)
+summary(fit)
+plot_pars(fit, regex_pars = "sigma_")
+```
+
+#Q2 - Ecological trap?
+**Does the presence of adults influence the habitat choice of juveniles, and does this effect differ depending on the identity of the coral colony?**
+
+Yes, juveniles are more likely to recruit to a dead coral if there are adults present, sig interaction p<0.0001, Adj R2 = 0.74, F-statistic: 138.4 on 4 and 183 DF,
+
+##Transect level Manlys
+###data
+
+```{r}
+
+tran_used <- crest_surveys %>% 
+  mutate(adult.p = if_else(adult>0, "adult present", "adult absent"),
+         ID = str_c(type, adult.p, sep="_")) %>% 
+  group_by(Code, ID) %>% 
+  summarise(freq=sum(juv2)) %>% 
+  pivot_wider(names_from = ID, values_from = freq, values_fill = 0) 
+
+crl.avail <- crest_surveys %>% 
+  mutate(adult.p = if_else(adult>0, "adult present", "adult absent"),
+         ID = str_c(type, adult.p, sep="_"),
+         LC.prop = LC/(LC+DC),
+         DC.prop = DC/(LC+DC)) %>% 
+  dplyr::select(Code, LC.prop, DC.prop) 
+
+  #calc 
+juvs.avail <- tran_used%>%  
+  full_join(crl.avail, by="Code") %>% 
+  dplyr::mutate("Live_adult present" = LC.prop,
+                "Live_adult absent" = LC.prop,
+                "Dead_adult present" = DC.prop,
+                "Dead_adult absent" = DC.prop) %>% 
+  dplyr::select(1:5) %>%
+  distinct() %>% 
+   column_to_rownames(var = "Code")
+  
+tran_used <- tran_used %>% 
+  column_to_rownames(var = "Code")
+
+library(adehabitatHS)  
+wiRatio <- widesIII(u=tran_used, a=juvs.avail, alpha =0.05)
+
+plot(wiRatio)
+
+#extract data
+manly_data <- data.frame(wiRatio$wij) %>% 
+  rownames_to_column(var = "Code") %>% 
+  inner_join(crl.avail, by = "Code") %>% 
+  pivot_longer(cols = 2:5, names_to = "type", values_to = "MSC") %>% 
+  distinct() %>% 
+  mutate(c.type = fct_relevel(str_split(type, "_", simplify = T)[,1], "Dead"),
+         adult = str_split(type, "_", simplify = T)[,2]) 
+  
+
+```
+
+###figure
+```{r}
+#plot it
+
+(eco_trap <- ggplot(data = manly_data, aes(x=DC.prop, y= log(MSC), fill = c.type, shape = adult))+
+  stat_smooth(aes(colour = c.type), method = "lm", se = T, size =0.5, show.legend = F)+
+  geom_point(size = 3, alpha = 0.8, show.legend = T)+
+  scale_shape_manual(values = c(21,22), name = "adults", labels = c("absent", "present"))+
+  scale_fill_manual(values = cols_, name = "colony type")+
+  geom_abline(intercept = 0, slope = 0, linetype = "dashed")+
+  guides(fill = guide_legend(override.aes=list(shape=21)),
+         colour = guide_none())+
+  labs(x = "Proportion dead coral")+
+  theme_classic()+
+  annotate("text", label = "preference", x = 0.05, y=0.2)+
+  annotate("text", label = "avoidance", x = 0.05, y=-0.2))
+
+# ggsave("./figures/Figure 3_V2.jpg", width = 20, height = 15, units="cm")
+
+```
+### analysis
+```{r}
+
+manly_stat <- lm(log(MSC+1)~DC.prop+c.type*adult, data = manly_data)
+summary(manly_stat)
+plot(manly_stat)
+
+```
+##Q2b - Demographic consequence
+
+**One of the assumptions of ecological trap is that there has to be a demonstrated negative demographic consequence of being trapped. So, what happens to the density of P. mol after 1 year?**
+
+The density of P. mol adults declined by 54% (t1 0.39, t2 0.17), and juvenils by 17% (t1 0.06, t2 0.04), and this difference is significant for  adutls (adults F = 13.45 (1,87), P<0.001) , but not for juveniles (juveniles F = 0.7 (1,87), P=0.4).
+
+###Data
+```{r}
+
+T2_raw <- read_csv("./data/surveys_RAW_T2.csv")
+
+```
+###analysis
+
+```{r}
+T2_dens <- T2_raw %>%
+  dplyr::mutate(adult_den = adult/100,
+                juv_den = juv/100) %>% 
+  dplyr::mutate(period = "t2") %>% 
+  dplyr::select("Code", "adult", "juv", "adult_den", "juv_den", "period")
+
+diff_dens <- crest_surveys %>%
+  group_by(Code) %>% 
+ mutate( adult = replace_na(as.double(adult), 0)) %>% 
+  summarise(adult = sum(adult),
+            juv = sum(juv)) %>% 
+  dplyr::mutate(adult_den = adult/100,
+                juv_den = juv/100) %>% 
+  dplyr::mutate(period = "t1") %>% 
+  add_row(T2_dens)
+
+#analysis
+summary(aov(adult_den~period, data = diff_dens))
+summary(aov(juv_den~period, data = diff_dens))
+
+#summarise
+T2_summary <- T2_raw %>%
+  dplyr::mutate(adult_den = adult/100,
+                juv_den = juv/100) %>% 
+   summarise(mean_adult = mean(adult_den),
+            SEM_adult = sd(adult_den/sqrt(length(adult_den))),
+            mean_juv = mean(juv_den),
+            SEM_juv = sd(juv_den/sqrt(length(juv_den)))) %>%
+  dplyr::mutate(period = "t2") 
+
+diff_summary <- crest_surveys %>%
+  group_by(Code) %>% 
+ mutate( adult = replace_na(as.double(adult), 0)) %>% 
+  summarise(adult = sum(adult),
+            juv = sum(juv)) %>% 
+  dplyr::mutate(adult_den = adult/100,
+                juv_den = juv/100) %>% 
+  summarise(mean_adult = mean(adult_den),
+            SEM_adult = sd(adult_den/sqrt(length(adult_den))),
+            mean_juv = mean(juv_den),
+            SEM_juv = sd(juv_den/sqrt(length(juv_den)))) %>%
+  dplyr::mutate(period = "t1") %>% 
+  add_row(T2_summary)
+  
+```
+
+
+
+# Q3 - Experiment
+Does DD HS occur? Is it influenced by the identity of the alternate coral colony, when there is an adult present ( Ie teasing apart cue of conspecific vs cue from live coral)?
+**YES, The density of adults on the established coral colony had a significant effect on the habitat choice of P. moluccensis juveniles in the habitat selection experiment X2=62.7, df=2, p<0.0001**
+
+###Data
+```{r}
+expt_data <- read_csv("./data/Choice.csv") %>% 
+  janitor::clean_names() %>% 
+  group_by(treatment, density, code) %>% 
+  mutate(n.trials = length(trial)) %>% 
+  mutate(treatment = recode(treatment, 
+                            "1.Live" = "Live",
+                            "2.Degraded" = "Dead"))
+
+#for points only
+
+expt_points <- expt_data %>% 
+  dplyr::select(2:5) %>% 
+  distinct()
+```
+###Analysis
+```{r}
+##Test
+choice_log=glm(data=expt_data, code~treatment+density, family=binomial(logit))
+summary(choice_log)
+anova(choice_log, test="Chisq")
+
+
+### Calculating likelihood ratio for appropriate model ####
+with (choice_log, null.deviance-deviance)
+with (choice_log, df.null-df.residual)
+with (choice_log, pchisq(null.deviance - deviance, df.null - df.residual, lower.tail = FALSE))
+
+### Walds Chisq values
+
+wald.test(b = coef(choice_log), Sigma = vcov(choice_log), Terms = 2)
+wald.test(b = coef(choice_log), Sigma = vcov(choice_log), Terms = 3)
+
+
+##predicting LD50 (for p specific values)
+
+choice_H=glm(data=subset(expt_data, expt_data$treatment=="Live"), code~density, family=binomial(logit)) #subset dataset for each separate model (ie outcomes)
+predict_H=(dose.p(choice_H, p=c(0.5, 0.75,0.8, 0.9))) #calculates the "dose" (=y-value) where p (=x-value) equals the numbers you specify
+
+choice_D=glm(data=subset(expt_data, expt_data$treatment=="Dead"), code~density, family=binomial(logit))
+predict_D=(dose.p(choice_D, p=c(0.5, 0.75,0.8, 0.9)))
+
+52.69085*1.96 #95%CI Degraded
+35.98636*1.96 #95%CI Healthy
+```
+
+###Figure
+```{r}
+(expt_plot <- ggplot(data = expt_data, aes(x=density, y=code ))+
+ geom_point(data = expt_points, aes(size = n.trials, fill = treatment), shape = 21,  alpha = 0.5)+
+  stat_smooth(method="glm",method.args = list(family = "binomial"), se=T,  size=0.7, aes(fill=treatment, linetype = treatment, colour = treatment))+ 
+   scale_fill_manual(values = cols_)+ 
+   #LD50 line Live (use values here that you caclculated using dose.p)
+geom_segment( aes(y = 0.5, yend = 0.5, xend = 316.8520, x = -Inf),size=0.5, linetype = "dotted") + 
+geom_segment( aes(x=316.8520,y=-Inf,xend=316.8520,yend=0.5),size=0.5, linetype = "dotted") +
+
+#LD50 line Dead (use values here that you caclculated using dose.p)
+geom_segment( aes(y = 0.5, yend = 0.5, xend = 411.8904,x =316.8520 ),size=0.5,linetype = "dotted") +
+geom_segment( aes(x=411.8904, xend=411.8904, yend=0.5,y = -Inf),size=0.5, linetype = "dotted") + 
+  labs(x="Density on established colony", y="Colony choice")+
+  guides(fill=guide_none(),
+         linetype = guide_legend(title="Alternate \ncolony type"),
+         colour = guide_legend(title="Alternate \ncolony type", override.aes=list(fill=NA)),
+         size = guide_legend(title="Number of \ntrials") )+
+  theme_DDHS)
+
+# ggsave("./figures/Figure 4.svg", width = 15, height = 10, units = "cm")
+```
+
+
