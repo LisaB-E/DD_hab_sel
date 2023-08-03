@@ -1,2 +1,0 @@
-# EcoTraps
-DD HS -> EcoTraps
